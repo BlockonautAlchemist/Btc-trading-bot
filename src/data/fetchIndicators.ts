@@ -116,7 +116,6 @@ export const fetchBtcIndicators = async (): Promise<BtcIndicators> => {
         params: {
           vs_currency: "usd",
           days: "2",
-          interval: "hourly",
         },
       });
       chartData = response.data;
