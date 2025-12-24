@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BTC 24h Prediction Bot</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      body {
+        margin: 0;
+        padding: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #0f1115;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen,
+          Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", sans-serif;
+        color: #e7ebf4;
+      }
+      .card {
+        background: #161a21;
+        border: 1px solid #1f2632;
+        border-radius: 12px;
+        padding: 24px;
+        width: min(480px, 90vw);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+      }
+      h1 {
+        margin: 0 0 12px;
+        font-size: 20px;
+        font-weight: 700;
+      }
+      .label {
+        color: #9aa4b5;
+        font-weight: 600;
+        margin-top: 12px;
+      }
+      .value {
+        margin: 4px 0 0;
+        font-size: 16px;
+        word-break: break-word;
+      }
+      .error {
+        margin-top: 12px;
+        color: #f28b82;
+        font-weight: 600;
+      }
+      .loading {
+        color: #9aa4b5;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1 id="title">BTC 24h Prediction (Loading...)</h1>
+      <div class="loading" id="loading">Loading latest prediction...</div>
+      <div id="content" style="display:none;">
+        <div class="label">Direction:</div>
+        <div class="value" id="direction">--</div>
+
+        <div class="label">Confidence:</div>
+        <div class="value" id="confidence">--</div>
+
+        <div class="label">Target Price (24h):</div>
+        <div class="value" id="target">--</div>
+
+        <div class="label">Reasoning:</div>
+        <div class="value" id="reasoning">--</div>
+      </div>
+      <div class="error" id="error" style="display:none;"></div>
+    </div>
+    <script src="./script.js"></script>
+  </body>
+  </html>
+

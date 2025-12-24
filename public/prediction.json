@@ -1,0 +1,7 @@
+{
+  "timestamp": "2025-12-24T18:49:09.295Z",
+  "direction": "SHORT",
+  "confidence": 78,
+  "targetPrice": 86800,
+  "reasoning": "The trendDirection is DOWN with a negative trendStrengthPct and emaShort is below emaLong, indicating strong bearish momentum. While volumeTrend24hPct is down, the overall established downtrend is likely to continue. I am projecting a price target of 86800 based on a 40% continuation of the recent range downwards, as the volatility is relatively low."
+}
