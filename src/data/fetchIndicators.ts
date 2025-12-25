@@ -19,7 +19,7 @@ export interface DerivedIndicators {
   volumeTrend24hPct: number | null;
 }
 
-export interface BtcIndicators {
+export interface SolIndicators {
   spot: SpotStats;
   derived: DerivedIndicators;
 }
@@ -69,9 +69,9 @@ function computeStdDevPct(values: number[]): number {
   return Math.sqrt(variance);
 }
 
-export const fetchBtcIndicators = async (): Promise<BtcIndicators> => {
+export const fetchSolIndicators = async (): Promise<SolIndicators> => {
   try {
-    const { data: coinData } = await cg.get("/coins/bitcoin", {
+    const { data: coinData } = await cg.get("/coins/solana", {
       params: {
         localization: "false",
         tickers: "false",
@@ -112,7 +112,7 @@ export const fetchBtcIndicators = async (): Promise<BtcIndicators> => {
     // Try to fetch market chart data, but gracefully fallback if it fails
     let chartData: any = null;
     try {
-      const response = await cg.get("/coins/bitcoin/market_chart", {
+      const response = await cg.get("/coins/solana/market_chart", {
         params: {
           vs_currency: "usd",
           days: "2",

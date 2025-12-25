@@ -1,7 +1,7 @@
 import "dotenv/config";
 import axios from "axios";
-import { BTC_TRADER_SYSTEM_PROMPT } from "./prompt";
-import { fetchBtcIndicators } from "./data/fetchIndicators";
+import { SOL_TRADER_SYSTEM_PROMPT } from "./prompt";
+import { fetchSolIndicators } from "./data/fetchIndicators";
 
 export interface PredictionResult {
   timestamp: string;
@@ -55,15 +55,15 @@ const parsePrediction = (raw: string): PredictionResult => {
   };
 };
 
-export const runBtcPrediction = async (): Promise<PredictionResult> => {
-  const indicators = await fetchBtcIndicators();
+export const runSolPrediction = async (): Promise<PredictionResult> => {
+  const indicators = await fetchSolIndicators();
 
   const messages = [
-    { role: "system", content: BTC_TRADER_SYSTEM_PROMPT },
+    { role: "system", content: SOL_TRADER_SYSTEM_PROMPT },
     {
       role: "user",
       content:
-        "Use ONLY this real CoinGecko data to make a single strict 24h BTC prediction:\n\n" +
+        "Use ONLY this real CoinGecko data to make a single strict 24h SOL prediction:\n\n" +
         JSON.stringify(indicators, null, 2),
     },
   ];
@@ -79,7 +79,7 @@ export const runBtcPrediction = async (): Promise<PredictionResult> => {
         Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
         "Content-Type": "application/json",
         "HTTP-Referer": process.env.OPENROUTER_SITE_URL || "http://localhost",
-        "X-Title": "Real BTC 24h Bot",
+        "X-Title": "Real SOL 24h Bot",
       },
     }
   );

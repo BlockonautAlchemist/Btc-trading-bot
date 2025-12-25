@@ -1,14 +1,14 @@
 import "dotenv/config";
 import fs from "fs/promises";
 import path from "path";
-import { runBtcPrediction } from "./prediction";
+import { runSolPrediction } from "./prediction";
 
 const OUTPUT_DIR = path.join(process.cwd(), "public");
 const OUTPUT_FILE = path.join(OUTPUT_DIR, "prediction.json");
 
 const main = async (): Promise<void> => {
   try {
-    const result = await runBtcPrediction();
+    const result = await runSolPrediction();
 
     const payload = {
       timestamp: result.timestamp,
