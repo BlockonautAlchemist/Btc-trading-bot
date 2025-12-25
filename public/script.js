@@ -25,7 +25,7 @@
     const dateStr = data.timestamp
       ? new Date(data.timestamp).toLocaleString()
       : "Unknown";
-    if (titleEl) titleEl.textContent = `BTC 24h Prediction (Updated ${dateStr})`;
+    if (titleEl) titleEl.textContent = `SOL 24h Prediction (Updated ${dateStr})`;
     if (directionEl) directionEl.textContent = data.direction ?? "--";
     if (confidenceEl)
       confidenceEl.textContent =
