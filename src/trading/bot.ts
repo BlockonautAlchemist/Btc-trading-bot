@@ -20,13 +20,6 @@ async function executeTrade(intent: TradeIntent) {
     return;
   }
 
-  if (jupPerpsEnv !== "devnet") {
-    console.log(
-      "Jupiter Perps only enabled for devnet right now. DRY RUN, no transaction sent."
-    );
-    return;
-  }
-
   const side = intent.action === "OPEN_LONG" ? "long" : "short";
 
   const market = await getSolPerpsMarketConfig(bot.publicKey, side);

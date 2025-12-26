@@ -1,7 +1,7 @@
 {
-  "timestamp": "2025-12-26T04:50:26.889Z",
+  "timestamp": "2025-12-26T22:09:23.556Z",
   "direction": "SHORT",
-  "confidence": 58,
-  "targetPrice": 120.73,
-  "reasoning": "Despite a RANGE trend, the EMAs are nearly crossed to the downside while trendStrengthPct is negative. Volume has also significantly decreased, suggesting a lack of buying pressure within the current volatility."
+  "confidence": 78,
+  "targetPrice": 119.5,
+  "reasoning": "The trendDirection is DOWN, confirmed by emaShort being below emaLong and a negative trendStrengthPct. High volumeTrend24hPct indicates strong selling interest, reinforcing the bearish outlook."
 }

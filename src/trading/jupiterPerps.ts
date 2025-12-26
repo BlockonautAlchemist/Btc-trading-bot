@@ -2,6 +2,7 @@ import {
   Connection,
   Keypair,
   PublicKey,
+  SendTransactionError,
   VersionedTransaction,
 } from "@solana/web3.js";
 import { getAccount, getAssociatedTokenAddress } from "@solana/spl-token";
@@ -19,17 +20,17 @@ export interface PerpsMarketConfig {
 type Side = "long" | "short";
 
 const PERPS_API_BASE = "https://perps-api.jup.ag/v1";
-// Mint addresses: SOL and devnet USDC
+// Mint addresses: SOL and USDC
 const SOL_MINT = "So11111111111111111111111111111111111111112";
-const DEVNET_USDC_MINT = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
-const DEVNET_USDC_MINT_PK = new PublicKey(DEVNET_USDC_MINT);
+const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const USDC_MINT_PK = new PublicKey(USDC_MINT);
 
-async function getDevnetUsdcBalance(
+async function getUsdcBalance(
   connection: Connection,
   owner: PublicKey
 ): Promise<number> {
   try {
-    const ata = await getAssociatedTokenAddress(DEVNET_USDC_MINT_PK, owner);
+    const ata = await getAssociatedTokenAddress(USDC_MINT_PK, owner);
     const account = await getAccount(connection, ata);
     // USDC has 6 decimals
     return Number(account.amount) / 1_000_000;
@@ -43,10 +44,6 @@ export async function getSolPerpsMarketConfig(
   botPubkey: PublicKey,
   side: Side
 ): Promise<PerpsMarketConfig | null> {
-  if (jupPerpsEnv !== "devnet") {
-    return null;
-  }
-
   // For API-based approach, we don't need actual market config.
   // The API handles account derivation internally. Return dummy config.
   return {
@@ -74,18 +71,6 @@ export async function buildAndSendPerpsTx(
       return null;
     }
 
-    const isDevnet = jupPerpsEnv === "devnet";
-
-    const MIN_NOTIONAL_USD = isDevnet ? 0.1 : 1; // allow tiny trades on devnet
-    const MIN_COLLATERAL_USD = isDevnet ? 0.5 : 10; // devnet hack: much lower collateral
-
-    if (jupPerpsEnv !== "devnet") {
-      console.log(
-        "Perps trades are in DRY RUN because JUP_PERPS_ENV is not devnet."
-      );
-      return null;
-    }
-
     const side: Side = intent.action === "OPEN_LONG" ? "long" : "short";
 
     // For shorts, use USDC as collateral; for longs, use SOL
@@ -101,14 +86,17 @@ export async function buildAndSendPerpsTx(
     }
 
     let balanceUsd: number;
-    const assumedSolPriceUsd = 100; // devnet approximation
+    const assumedSolPriceUsd = 100; // simple approximation
+    const minCollateralUsd = 10;
 
     if (isShort) {
-      // SHORT → USDC collateral on devnet
-      const usdcBalance = await getDevnetUsdcBalance(connection, bot.publicKey);
-      if (usdcBalance <= 0) {
+      // SHORT → USDC collateral
+      const usdcBalance = await getUsdcBalance(connection, bot.publicKey);
+      if (usdcBalance < minCollateralUsd) {
         console.log(
-          "[Perps] No devnet USDC in bot wallet; cannot open SHORT. Skipping trade."
+          `[Perps] Need at least $${minCollateralUsd} of USDC for collateral; have ~$${usdcBalance.toFixed(
+            2
+          )}. Skipping trade.`
         );
         return null;
       }
@@ -117,6 +105,20 @@ export async function buildAndSendPerpsTx(
     } else {
       // LONG → SOL collateral (approximate USD value for sizing)
       balanceUsd = balanceSol * assumedSolPriceUsd;
+
+      const requiredCollateralLamports = Math.ceil(
+        (minCollateralUsd / assumedSolPriceUsd) * 1_000_000_000
+      );
+      if (balanceLamports < requiredCollateralLamports) {
+        console.log(
+          `[Perps] Need at least ${(requiredCollateralLamports / 1_000_000_000).toFixed(
+            4
+          )} SOL (~$${minCollateralUsd}) for collateral; have ${balanceSol.toFixed(
+            4
+          )} SOL. Skipping trade.`
+        );
+        return null;
+      }
     }
 
     // Simple notional sizing: cap at $10 equivalent or riskFraction of balance.
@@ -125,30 +127,24 @@ export async function buildAndSendPerpsTx(
       Math.min(balanceUsd * intent.riskFraction, 10)
     );
 
-    if (targetUsd < MIN_NOTIONAL_USD) {
+    if (targetUsd < 1) {
       console.log(
-        `[Perps] Not enough balance for minimum notional on ${jupPerpsEnv}. ` +
-          `Computed ~$${targetUsd.toFixed(2)}, min is ~$${MIN_NOTIONAL_USD.toFixed(
-            2
-          )}; skipping.`
+        `Not enough balance for minimum notional (computed ~$${targetUsd.toFixed(
+          2
+        )}); skipping.`
       );
       return null;
     }
 
     // API requirements:
-    // - Minimum collateral: $10 for new positions (relaxed on devnet)
+    // - Minimum collateral: $10 for new positions
     // - Leverage must be > 1.1 (so sizeUsdDelta must be > $11 when collateral is $10)
     // Adjust targetUsd to meet minimum collateral requirement
-    const minCollateralUsd = MIN_COLLATERAL_USD;
     const adjustedTargetUsd = Math.max(targetUsd, minCollateralUsd * 1.2); // At least $12 to have leverage > 1.1
-
-    if (isDevnet && minCollateralUsd < 10) {
-      console.log(
-        `[Perps] DEVNET MODE: using relaxed min collateral of $${minCollateralUsd.toFixed(
-          2
-        )} (mainnet would require ~$10+).`
-      );
-    }
+    const collateralUsd = minCollateralUsd;
+    // Further bump notional to comfortably clear leverage threshold even if oracle SOL price
+    // is higher than our assumedSolPriceUsd. Target 1.3x the collateral size.
+    const sizeUsdTarget = Math.max(adjustedTargetUsd, collateralUsd * 1.3);
 
     console.log(
       `Opening ${side.toUpperCase()} SOL position: ~$${adjustedTargetUsd.toFixed(
@@ -157,22 +153,37 @@ export async function buildAndSendPerpsTx(
     );
     
     // Build transaction via Perps API (returns a ready-to-sign serialized tx).
-    const sizeUsdDelta = Math.max(1, Math.floor(adjustedTargetUsd * 1_000_000)); // 6dp
-    
-    // Use minimum required collateral ($10) to maximize leverage while meeting API requirements
-    const collateralUsd = minCollateralUsd;
+    const sizeUsdDelta = Math.max(1, Math.floor(sizeUsdTarget * 1_000_000)); // 6dp
+    const intendedLeverage = sizeUsdDelta / 1_000_000 / collateralUsd;
+    console.log(
+      `Requested sizeUsdDelta=$${(sizeUsdDelta / 1_000_000).toFixed(
+        2
+      )}, collateralUsd=$${collateralUsd.toFixed(2)}, intended leverage=${intendedLeverage.toFixed(2)}x`
+    );
+
+    if (jupPerpsEnv === "mainnet") {
+      console.log(
+        `[Perps] MAINNET TRADE side=${side} sizeUsd=$${(sizeUsdDelta / 1_000_000).toFixed(
+          2
+        )} collateralUsd=$${collateralUsd.toFixed(2)} leverageTarget=${intendedLeverage.toFixed(2)}x`
+      );
+    }
     
     // For shorts: inputTokenAmount in USDC (6 decimals); for longs: in SOL lamports (9 decimals)
     let inputTokenAmount: string;
     let collateralTokenDelta: string;
     if (isShort) {
       // USDC has 6 decimals
-      inputTokenAmount = String(Math.max(1, Math.floor(targetUsd * 1_000_000)));
       collateralTokenDelta = String(Math.max(1, Math.floor(collateralUsd * 1_000_000)));
+      // Pay in exactly the collateral amount when opening
+      inputTokenAmount = collateralTokenDelta;
     } else {
       // SOL has 9 decimals (lamports)
-      inputTokenAmount = String(Math.max(1, Math.floor((targetUsd / assumedSolPriceUsd) * 1_000_000_000)));
-      collateralTokenDelta = String(Math.max(1, Math.floor((collateralUsd / assumedSolPriceUsd) * 1_000_000_000)));
+      collateralTokenDelta = String(
+        Math.max(1, Math.floor((collateralUsd / assumedSolPriceUsd) * 1_000_000_000))
+      );
+      // Pay in exactly the collateral amount when opening
+      inputTokenAmount = collateralTokenDelta;
     }
 
     const payload = {
@@ -182,8 +193,8 @@ export async function buildAndSendPerpsTx(
       inputTokenAmount,
       // Required fields per API error
       marketMint: SOL_MINT,
-      inputMint: isShort ? DEVNET_USDC_MINT : SOL_MINT,
-      collateralMint: isShort ? DEVNET_USDC_MINT : SOL_MINT,
+      inputMint: isShort ? USDC_MINT : SOL_MINT,
+      collateralMint: isShort ? USDC_MINT : SOL_MINT,
       collateralTokenDelta,
       sizeUsdDelta: String(sizeUsdDelta),
       maxSlippageBps: "200",
@@ -192,7 +203,7 @@ export async function buildAndSendPerpsTx(
       feeReceiver: bot.publicKey.toBase58(),
       walletAddress: bot.publicKey.toBase58(),
       transactionType: "legacy",
-      env: "devnet",
+      env: jupPerpsEnv,
     };
 
     const resp = await axios.post(`${PERPS_API_BASE}/positions/increase`, payload, {
@@ -206,24 +217,72 @@ export async function buildAndSendPerpsTx(
     }
 
     const { serializedTxBase64, txMetadata } = resp.data;
+    if (txMetadata) {
+      console.log("Perps txMetadata (from API):", txMetadata);
+    }
     if (!serializedTxBase64) {
-      console.log("Perps API did not return a serialized transaction.");
+      console.log("Perps API did not return a serialized transaction. Full response:");
+      console.log(resp.data);
       return null;
     }
 
     const txBytes = Buffer.from(serializedTxBase64, "base64");
     const tx = VersionedTransaction.deserialize(txBytes);
 
+    // Debug: list program IDs and address table lookups to ensure we are on the right cluster.
+    try {
+      const message = tx.message;
+      const programIds = new Set<string>();
+      for (const ix of message.compiledInstructions) {
+        const pid = message.staticAccountKeys[ix.programIdIndex]?.toBase58();
+        if (pid) programIds.add(pid);
+      }
+      if (message.addressTableLookups?.length) {
+        console.log(
+          "Address table lookups (program IDs will be resolved on-chain):",
+          message.addressTableLookups.map((l) => ({
+            accountKey: l.accountKey.toBase58(),
+            writableIndexes: Array.from(l.writableIndexes),
+            readonlyIndexes: Array.from(l.readonlyIndexes),
+          }))
+        );
+      }
+      console.log("Programs referenced in tx:", Array.from(programIds));
+    } catch (ixLogErr) {
+      console.warn("Could not decode program IDs:", ixLogErr);
+    }
+
     // Refresh blockhash to avoid "blockhash not found" on our RPC.
     const latest = await connection.getLatestBlockhash("confirmed");
     tx.message.recentBlockhash = latest.blockhash;
     tx.sign([bot]);
 
-    // Skip preflight to avoid blockhash simulation issues - API provides valid blockhash
-    const sig = await connection.sendRawTransaction(tx.serialize(), {
-      skipPreflight: false,
-      maxRetries: 3,
-    });
+    let sig: string;
+    try {
+      // Skip preflight if the API-provided blockhash is close to expiring; otherwise allow simulation
+      sig = await connection.sendRawTransaction(tx.serialize(), {
+        skipPreflight: false,
+        maxRetries: 3,
+      });
+    } catch (sendErr) {
+      const ste = sendErr as SendTransactionError;
+      console.error("SendRawTransaction failed:", ste);
+      if (ste?.logs) {
+        console.error("Simulation logs:", ste.logs);
+      }
+      // Some SendTransactionError instances support getLogs(); call if present.
+      if (typeof (ste as any).getLogs === "function") {
+        try {
+          const extraLogs = await (ste as any).getLogs(connection);
+          if (extraLogs) {
+            console.error("Simulation logs (getLogs):", extraLogs);
+          }
+        } catch (_) {
+          // ignore secondary failure
+        }
+      }
+      return null;
+    }
 
     // Confirm transaction using returned blockhash metadata
     try {

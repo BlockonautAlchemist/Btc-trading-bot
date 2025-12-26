@@ -15,11 +15,5 @@ export const config = (() => {
   };
 })();
 
-export const jupPerpsEnv = process.env.JUP_PERPS_ENV ?? "devnet";
-
-if (jupPerpsEnv !== "devnet") {
-  console.warn(
-    "Jupiter Perps is only supported on devnet right now; trades will be treated as dry-run."
-  );
-}
+export const jupPerpsEnv = process.env.JUP_PERPS_ENV ?? "mainnet";
 
