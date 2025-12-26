@@ -10,9 +10,11 @@
     "trade:sol": "ts-node src/trading/runBot.ts"
   },
   "dependencies": {
+    "@solana/kit": "^5.1.0",
+    "@solana/web3.js": "^1.95.3",
     "axios": "^1.6.7",
     "dotenv": "^16.3.1",
-    "@solana/web3.js": "^1.95.3"
+    "jup-perps-client": "^1.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.10.4",
@@ -20,4 +22,3 @@
     "typescript": "^5.3.3"
   }
 }
-
