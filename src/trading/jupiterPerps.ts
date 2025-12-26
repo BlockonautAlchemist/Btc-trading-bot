@@ -4,19 +4,10 @@ import {
   PublicKey,
   VersionedTransaction,
 } from "@solana/web3.js";
-import { createSolanaRpc } from "@solana/kit";
+import { getAccount, getAssociatedTokenAddress } from "@solana/spl-token";
 import axios from "axios";
 import type { TradeIntent } from "./types";
 import { config, jupPerpsEnv } from "../config";
-
-export async function getPerpsClient(connection: Connection) {
-  // The kit client is used for data fetch helpers (pools/custodies).
-  const rpcEndpoint =
-    (connection as unknown as { rpcEndpoint?: string }).rpcEndpoint ??
-    (connection as unknown as { _rpcEndpoint?: string })._rpcEndpoint ??
-    config.rpcUrl;
-  return createSolanaRpc(rpcEndpoint);
-}
 
 export interface PerpsMarketConfig {
   pool: PublicKey;
@@ -27,66 +18,25 @@ export interface PerpsMarketConfig {
 
 type Side = "long" | "short";
 
-const DEVNET_FALLBACKS = {
-  programId: null as PublicKey | null,
-  solLong: {
-    pool: null as PublicKey | null,
-    custody: null as PublicKey | null,
-    collateralCustody: null as PublicKey | null,
-  },
-  solShort: {
-    pool: null as PublicKey | null,
-    custody: null as PublicKey | null,
-    collateralCustody: null as PublicKey | null,
-  },
-};
-
-const DEVNET_PERPS_ENDPOINT =
-  "https://perps-api.jup.ag/v1/config?env=devnet&symbol=SOL";
 const PERPS_API_BASE = "https://perps-api.jup.ag/v1";
+// Mint addresses: SOL and devnet USDC
+const SOL_MINT = "So11111111111111111111111111111111111111112";
+const DEVNET_USDC_MINT = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+const DEVNET_USDC_MINT_PK = new PublicKey(DEVNET_USDC_MINT);
 
-async function fetchDevnetSolConfig(): Promise<PerpsMarketConfig | null> {
+async function getDevnetUsdcBalance(
+  connection: Connection,
+  owner: PublicKey
+): Promise<number> {
   try {
-    const { data } = await axios.get(DEVNET_PERPS_ENDPOINT, {
-      timeout: 5_000,
-      validateStatus: () => true,
-    });
-
-    const pool = data?.poolAddress as string | undefined;
-    const custody = data?.custodyAddress as string | undefined;
-    const collateralCustody = data?.collateralCustodyAddress as
-      | string
-      | undefined;
-    const programId = data?.programId as string | undefined;
-
-    if (pool && custody && collateralCustody && programId) {
-      return {
-        pool: new PublicKey(pool),
-        custody: new PublicKey(custody),
-        collateralCustody: new PublicKey(collateralCustody),
-        programId: new PublicKey(programId),
-      };
-    }
-
-    console.log(
-      "Jupiter Perps config endpoint did not return full SOL config. Received keys:",
-      { pool, custody, collateralCustody, programId }
-    );
-  } catch (error) {
-    console.log("Failed to fetch Jupiter Perps devnet config; will fall back:", error);
+    const ata = await getAssociatedTokenAddress(DEVNET_USDC_MINT_PK, owner);
+    const account = await getAccount(connection, ata);
+    // USDC has 6 decimals
+    return Number(account.amount) / 1_000_000;
+  } catch (_) {
+    // Most likely: no ATA or zero balance
+    return 0;
   }
-
-  if (DEVNET_FALLBACKS.programId && DEVNET_FALLBACKS.solLong.pool) {
-    console.log("Using static devnet fallback addresses for SOL perps.");
-    return {
-      pool: DEVNET_FALLBACKS.solLong.pool,
-      custody: DEVNET_FALLBACKS.solLong.custody!,
-      collateralCustody: DEVNET_FALLBACKS.solLong.collateralCustody!,
-      programId: DEVNET_FALLBACKS.programId!,
-    };
-  }
-
-  return null;
 }
 
 export async function getSolPerpsMarketConfig(
@@ -97,14 +47,8 @@ export async function getSolPerpsMarketConfig(
     return null;
   }
 
-  // TESTING: For API-based approach, we don't actually need the market config.
-  // The API handles account derivation internally. Return a dummy config.
-  // if (side === "short") {
-  //   console.log("SHORT SOL with USDC collateral is not yet supported on devnet; skipping.");
-  //   return null;
-  // }
-
-  // Return dummy config - API will handle the actual account resolution
+  // For API-based approach, we don't need actual market config.
+  // The API handles account derivation internally. Return dummy config.
   return {
     pool: PublicKey.default,
     custody: PublicKey.default,
@@ -143,17 +87,34 @@ export async function buildAndSendPerpsTx(
     const isShort = side === "short";
     const inputToken = isShort ? "USDC" : "SOL";
 
-    // Fetch collateral balance
+    // Always need SOL for fees
     const balanceLamports = await connection.getBalance(bot.publicKey);
     const balanceSol = balanceLamports / 1_000_000_000;
     if (balanceSol <= 0) {
-      console.log("Bot SOL balance is zero; cannot fund perps trade.");
+      console.log("Bot SOL balance is zero; cannot pay transaction fees.");
       return null;
     }
 
-    // Simple notional sizing: cap at $10 equivalent or riskFraction of balance.
+    let balanceUsd: number;
     const assumedSolPriceUsd = 100; // devnet approximation
-    const balanceUsd = balanceSol * assumedSolPriceUsd;
+
+    if (isShort) {
+      // SHORT → USDC collateral on devnet
+      const usdcBalance = await getDevnetUsdcBalance(connection, bot.publicKey);
+      if (usdcBalance <= 0) {
+        console.log(
+          "[Perps] No devnet USDC in bot wallet; cannot open SHORT. Skipping trade."
+        );
+        return null;
+      }
+      // 1 USDC ≈ 1 USD
+      balanceUsd = usdcBalance;
+    } else {
+      // LONG → SOL collateral (approximate USD value for sizing)
+      balanceUsd = balanceSol * assumedSolPriceUsd;
+    }
+
+    // Simple notional sizing: cap at $10 equivalent or riskFraction of balance.
     const targetUsd = Math.max(
       0,
       Math.min(balanceUsd * intent.riskFraction, 10)
@@ -168,18 +129,18 @@ export async function buildAndSendPerpsTx(
       return null;
     }
 
-    console.log(
-      `TESTING: Attempting to open/increase ${side.toUpperCase()} SOL position for approx $${targetUsd.toFixed(
-        2
-      )} notional on devnet using ${inputToken} as collateral.`
-    );
-
     // API requirements:
     // - Minimum collateral: $10 for new positions
     // - Leverage must be > 1.1 (so sizeUsdDelta must be > $11 when collateral is $10)
     // Adjust targetUsd to meet minimum collateral requirement
     const minCollateralUsd = 10;
     const adjustedTargetUsd = Math.max(targetUsd, minCollateralUsd * 1.2); // At least $12 to have leverage > 1.1
+
+    console.log(
+      `Opening ${side.toUpperCase()} SOL position: ~$${adjustedTargetUsd.toFixed(
+        2
+      )} notional using ${inputToken} collateral.`
+    );
     
     // Build transaction via Perps API (returns a ready-to-sign serialized tx).
     const sizeUsdDelta = Math.max(1, Math.floor(adjustedTargetUsd * 1_000_000)); // 6dp
@@ -200,10 +161,6 @@ export async function buildAndSendPerpsTx(
       collateralTokenDelta = String(Math.max(1, Math.floor((collateralUsd / assumedSolPriceUsd) * 1_000_000_000)));
     }
 
-    // Mint addresses: SOL and USDC
-    const SOL_MINT = "So11111111111111111111111111111111111111112";
-    const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"; // Mainnet USDC, might differ on devnet
-    
     const payload = {
       asset: "SOL", // Legacy field, might not be used
       side,
@@ -211,8 +168,8 @@ export async function buildAndSendPerpsTx(
       inputTokenAmount,
       // Required fields per API error
       marketMint: SOL_MINT,
-      inputMint: isShort ? USDC_MINT : SOL_MINT,
-      collateralMint: isShort ? USDC_MINT : SOL_MINT,
+      inputMint: isShort ? DEVNET_USDC_MINT : SOL_MINT,
+      collateralMint: isShort ? DEVNET_USDC_MINT : SOL_MINT,
       collateralTokenDelta,
       sizeUsdDelta: String(sizeUsdDelta),
       maxSlippageBps: "200",
@@ -224,48 +181,70 @@ export async function buildAndSendPerpsTx(
       env: "devnet",
     };
 
-    console.log("TESTING: Sending payload to API:", JSON.stringify(payload, null, 2));
-    
     const resp = await axios.post(`${PERPS_API_BASE}/positions/increase`, payload, {
       timeout: 10_000,
       validateStatus: () => true,
     });
 
-    console.log("TESTING: API response status:", resp.status);
-    console.log("TESTING: API response data:", JSON.stringify(resp.data, null, 2));
-
     if (!resp.data || resp.data.error) {
-      console.log("Perps API increase response error:", resp.data ?? resp.status);
+      console.log("Perps API error:", resp.data?.message ?? resp.data?.error ?? resp.status);
       return null;
     }
 
     const { serializedTxBase64, txMetadata } = resp.data;
     if (!serializedTxBase64) {
-      console.log("Perps API did not return a serialized transaction. Full response:", resp.data);
+      console.log("Perps API did not return a serialized transaction.");
       return null;
     }
 
     const txBytes = Buffer.from(serializedTxBase64, "base64");
     const tx = VersionedTransaction.deserialize(txBytes);
+
+    // Refresh blockhash to avoid "blockhash not found" on our RPC.
+    const latest = await connection.getLatestBlockhash("confirmed");
+    tx.message.recentBlockhash = latest.blockhash;
     tx.sign([bot]);
 
     // Skip preflight to avoid blockhash simulation issues - API provides valid blockhash
     const sig = await connection.sendRawTransaction(tx.serialize(), {
-      skipPreflight: true, // Skip simulation to avoid blockhash expiration issues
+      skipPreflight: false,
       maxRetries: 3,
     });
 
-    console.log("✅ TESTING SUCCESS: Sent perps tx via API; signature:", sig);
-    console.log("   Position pubkey:", resp.data.positionPubkey);
-    console.log("   Leverage:", resp.data.quote?.leverage);
-    console.log("   Side:", resp.data.quote?.side);
-    
-    // Confirm transaction
+    // Confirm transaction using returned blockhash metadata
     try {
-      await connection.confirmTransaction(sig, "confirmed");
+      const confirmation = await connection.confirmTransaction(
+        {
+          signature: sig,
+          blockhash: latest.blockhash,
+          lastValidBlockHeight: latest.lastValidBlockHeight,
+        },
+        "confirmed"
+      );
+
+      const quote = resp.data.quote;
+      if (confirmation.value.err) {
+        console.log("⚠️ Perps transaction not confirmed; RPC reported error:", confirmation.value.err);
+        return null;
+      }
+
+      console.log(`✅ Perps ${side.toUpperCase()} position opened:`);
+      console.log(`   Transaction: ${sig}`);
+      console.log(`   Position: ${resp.data.positionPubkey}`);
+      console.log(`   Size: $${quote?.positionSizeUsd ?? "N/A"}`);
+      console.log(`   Leverage: ${quote?.leverage ?? "N/A"}x`);
+      console.log(`   Entry Price: $${quote?.entryPriceUsd ?? "N/A"}`);
       console.log("✅ Transaction confirmed on-chain!");
     } catch (confirmError) {
-      console.log("⚠️  Transaction sent but confirmation pending:", confirmError);
+      const explorerUrl =
+        jupPerpsEnv === "devnet"
+          ? `https://solscan.io/tx/${sig}?cluster=devnet`
+          : `https://solscan.io/tx/${sig}`;
+      console.log(
+        "⚠️  Transaction sent but confirmation failed/pending; check manually:",
+        explorerUrl
+      );
+      return null;
     }
 
     return sig;
