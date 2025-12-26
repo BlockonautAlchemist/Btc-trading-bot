@@ -6,11 +6,13 @@
     "dev": "ts-node src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "save:prediction": "ts-node src/savePrediction.ts"
+    "save:prediction": "ts-node src/savePrediction.ts",
+    "trade:sol": "ts-node src/trading/runBot.ts"
   },
   "dependencies": {
     "axios": "^1.6.7",
-    "dotenv": "^16.3.1"
+    "dotenv": "^16.3.1",
+    "@solana/web3.js": "^1.95.3"
   },
   "devDependencies": {
     "@types/node": "^20.10.4",
