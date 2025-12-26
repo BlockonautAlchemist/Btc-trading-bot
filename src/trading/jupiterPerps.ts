@@ -74,6 +74,11 @@ export async function buildAndSendPerpsTx(
       return null;
     }
 
+    const isDevnet = jupPerpsEnv === "devnet";
+
+    const MIN_NOTIONAL_USD = isDevnet ? 0.1 : 1; // allow tiny trades on devnet
+    const MIN_COLLATERAL_USD = isDevnet ? 0.5 : 10; // devnet hack: much lower collateral
+
     if (jupPerpsEnv !== "devnet") {
       console.log(
         "Perps trades are in DRY RUN because JUP_PERPS_ENV is not devnet."
@@ -120,21 +125,30 @@ export async function buildAndSendPerpsTx(
       Math.min(balanceUsd * intent.riskFraction, 10)
     );
 
-    if (targetUsd < 1) {
+    if (targetUsd < MIN_NOTIONAL_USD) {
       console.log(
-        `Not enough balance for minimum notional (computed ~$${targetUsd.toFixed(
-          2
-        )}); skipping.`
+        `[Perps] Not enough balance for minimum notional on ${jupPerpsEnv}. ` +
+          `Computed ~$${targetUsd.toFixed(2)}, min is ~$${MIN_NOTIONAL_USD.toFixed(
+            2
+          )}; skipping.`
       );
       return null;
     }
 
     // API requirements:
-    // - Minimum collateral: $10 for new positions
+    // - Minimum collateral: $10 for new positions (relaxed on devnet)
     // - Leverage must be > 1.1 (so sizeUsdDelta must be > $11 when collateral is $10)
     // Adjust targetUsd to meet minimum collateral requirement
-    const minCollateralUsd = 10;
+    const minCollateralUsd = MIN_COLLATERAL_USD;
     const adjustedTargetUsd = Math.max(targetUsd, minCollateralUsd * 1.2); // At least $12 to have leverage > 1.1
+
+    if (isDevnet && minCollateralUsd < 10) {
+      console.log(
+        `[Perps] DEVNET MODE: using relaxed min collateral of $${minCollateralUsd.toFixed(
+          2
+        )} (mainnet would require ~$10+).`
+      );
+    }
 
     console.log(
       `Opening ${side.toUpperCase()} SOL position: ~$${adjustedTargetUsd.toFixed(
