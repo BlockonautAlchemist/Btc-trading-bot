@@ -1,7 +1,7 @@
 {
-  "timestamp": "2025-12-26T22:09:23.556Z",
+  "timestamp": "2025-12-27T03:11:35.218Z",
   "direction": "SHORT",
   "confidence": 78,
-  "targetPrice": 119.5,
-  "reasoning": "The trendDirection is DOWN, confirmed by emaShort being below emaLong and a negative trendStrengthPct. High volumeTrend24hPct indicates strong selling interest, reinforcing the bearish outlook."
+  "targetPrice": 120.4,
+  "reasoning": "The trendDirection is DOWN, validated by emaShort slightly below emaLong. Despite muted 24h change, a significant 76.8% increase in volumeTrend24h suggests persistent selling pressure. The target reflects about 50% of the recent 24h range in the downward direction."
 }

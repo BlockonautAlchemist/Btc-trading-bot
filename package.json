@@ -7,7 +7,8 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "save:prediction": "ts-node src/savePrediction.ts",
-    "trade:sol": "ts-node src/trading/runBot.ts"
+    "trade:sol": "ts-node src/trading/runBot.ts",
+    "loop:sol": "ts-node src/trading/loop.ts"
   },
   "dependencies": {
     "@solana/kit": "^5.1.0",

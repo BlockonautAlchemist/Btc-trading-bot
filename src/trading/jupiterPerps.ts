@@ -24,6 +24,9 @@ const PERPS_API_BASE = "https://perps-api.jup.ag/v1";
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const USDC_MINT_PK = new PublicKey(USDC_MINT);
+const TP_THRESHOLD_PCT = 0.035; // +3.5%
+const SL_THRESHOLD_PCT = -0.035; // -3.5%
+const MAX_POSITION_AGE_MS = 24 * 60 * 60 * 1000; // 24h
 
 async function getUsdcBalance(
   connection: Connection,
@@ -38,6 +41,161 @@ async function getUsdcBalance(
     // Most likely: no ATA or zero balance
     return 0;
   }
+}
+
+type NormalizedPerpsPosition = {
+  side: Side;
+  entryPrice: number | null;
+  markPrice: number | null;
+  createdAtMs: number | null;
+  sizeUsd: number | null;
+  raw: any;
+};
+
+function numOrNull(v: any): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string") {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+function normalizePerpsPosition(p: any): NormalizedPerpsPosition | null {
+  if (!p) return null;
+  const sideRaw = (p.side ?? p.positionSide ?? "").toString().toLowerCase();
+  const side: Side | null =
+    sideRaw === "long" ? "long" : sideRaw === "short" ? "short" : null;
+  if (!side) return null;
+
+  const entryPrice =
+    numOrNull(p.entryPriceUsd) ??
+    numOrNull(p.entryPrice) ??
+    numOrNull(p.avgEntryPriceUsd) ??
+    numOrNull(p.avgEntryPrice) ??
+    null;
+
+  const markPrice =
+    numOrNull(p.markPriceUsd) ??
+    numOrNull(p.indexPriceUsd) ??
+    numOrNull(p.oraclePriceUsd) ??
+    numOrNull(p.currentPriceUsd) ??
+    numOrNull(p.price) ??
+    null;
+
+  const createdField =
+    p.createdAt ?? p.createdTs ?? p.timestamp ?? p.openedAt ?? p.openTime;
+  let createdAtMs: number | null = null;
+  if (typeof createdField === "number") {
+    createdAtMs =
+      createdField > 3_000_000_000 ? createdField : createdField * 1000;
+  } else if (typeof createdField === "string") {
+    const ts = Number(createdField);
+    if (Number.isFinite(ts)) {
+      createdAtMs = ts > 3_000_000_000 ? ts : ts * 1000;
+    } else {
+      const d = Date.parse(createdField);
+      createdAtMs = Number.isFinite(d) ? d : null;
+    }
+  } else if (createdField instanceof Date) {
+    createdAtMs = createdField.getTime();
+  }
+
+  const sizeUsd =
+    numOrNull(p.positionSizeUsd) ??
+    numOrNull(p.sizeUsd) ??
+    numOrNull(p.notionalUsd) ??
+    numOrNull(p.size) ??
+    null;
+
+  return {
+    side,
+    entryPrice,
+    markPrice,
+    createdAtMs,
+    sizeUsd,
+    raw: p,
+  };
+}
+
+async function fetchOpenPerpsPositions(
+  wallet: PublicKey
+): Promise<any[] | null> {
+  try {
+    const resp = await axios.get(`${PERPS_API_BASE}/positions`, {
+      params: { wallet: wallet.toBase58(), env: jupPerpsEnv },
+      timeout: 10_000,
+      validateStatus: () => true,
+    });
+
+    if (!resp.data || resp.data.error) {
+      console.warn("Perps positions query failed:", resp.data?.message ?? resp.data?.error ?? resp.status);
+      return null;
+    }
+
+    const positionsRaw = Array.isArray(resp.data)
+      ? resp.data
+      : Array.isArray(resp.data.positions)
+      ? resp.data.positions
+      : [];
+
+    const openPositions = positionsRaw.filter((p: any) => {
+      if (!p) return false;
+      if (typeof p.isClosed === "boolean") return !p.isClosed;
+      if (typeof p.status === "string") return p.status.toLowerCase() !== "closed";
+      return true;
+    });
+
+    return openPositions;
+  } catch (err) {
+    console.warn("Failed to fetch open perps positions:", err);
+    return null;
+  }
+}
+
+function evaluateExitDecision(
+  pos: NormalizedPerpsPosition,
+  intent: TradeIntent
+): { shouldClose: boolean; reason: string | null } {
+  // Direction flip: if intent is opposite of existing position
+  if (
+    (intent.action === "OPEN_LONG" && pos.side === "short") ||
+    (intent.action === "OPEN_SHORT" && pos.side === "long")
+  ) {
+    return { shouldClose: true, reason: "Signal flipped direction" };
+  }
+
+  // Price-based TP/SL
+  if (pos.entryPrice && pos.markPrice) {
+    const movePct =
+      pos.side === "long"
+        ? (pos.markPrice - pos.entryPrice) / pos.entryPrice
+        : (pos.entryPrice - pos.markPrice) / pos.entryPrice;
+
+    if (movePct >= TP_THRESHOLD_PCT) {
+      return {
+        shouldClose: true,
+        reason: `Take profit triggered (+${(movePct * 100).toFixed(2)}%)`,
+      };
+    }
+
+    if (movePct <= SL_THRESHOLD_PCT) {
+      return {
+        shouldClose: true,
+        reason: `Stop loss triggered (${(movePct * 100).toFixed(2)}%)`,
+      };
+    }
+  }
+
+  // Max age
+  if (pos.createdAtMs) {
+    const ageMs = Date.now() - pos.createdAtMs;
+    if (ageMs >= MAX_POSITION_AGE_MS) {
+      return { shouldClose: true, reason: "Max position age exceeded (24h)" };
+    }
+  }
+
+  return { shouldClose: false, reason: null };
 }
 
 export async function getSolPerpsMarketConfig(
@@ -61,6 +219,137 @@ interface BuildParams {
   market: PerpsMarketConfig;
 }
 
+async function submitPerpsApiTx(params: {
+  payload: any;
+  side: Side;
+  connection: Connection;
+  bot: Keypair;
+  logLabel: string;
+}): Promise<string | null> {
+  const { payload, side, connection, bot, logLabel } = params;
+
+  const resp = await axios.post(
+    `${PERPS_API_BASE}/positions/${payload.reduceOnly ? "decrease" : "increase"}`,
+    payload,
+    {
+      timeout: 10_000,
+      validateStatus: () => true,
+    }
+  );
+
+  if (!resp.data || resp.data.error) {
+    console.log("Perps API error:", resp.data?.message ?? resp.data?.error ?? resp.status);
+    return null;
+  }
+
+  const { serializedTxBase64, txMetadata } = resp.data;
+  if (txMetadata) {
+    console.log("Perps txMetadata (from API):", txMetadata);
+  }
+  if (!serializedTxBase64) {
+    console.log("Perps API did not return a serialized transaction. Full response:");
+    console.log(resp.data);
+    return null;
+  }
+
+  const txBytes = Buffer.from(serializedTxBase64, "base64");
+  const tx = VersionedTransaction.deserialize(txBytes);
+
+  try {
+    const message = tx.message;
+    const programIds = new Set<string>();
+    for (const ix of message.compiledInstructions) {
+      const pid = message.staticAccountKeys[ix.programIdIndex]?.toBase58();
+      if (pid) programIds.add(pid);
+    }
+    if (message.addressTableLookups?.length) {
+      console.log(
+        "Address table lookups (program IDs will be resolved on-chain):",
+        message.addressTableLookups.map((l) => ({
+          accountKey: l.accountKey.toBase58(),
+          writableIndexes: Array.from(l.writableIndexes),
+          readonlyIndexes: Array.from(l.readonlyIndexes),
+        }))
+      );
+    }
+    console.log("Programs referenced in tx:", Array.from(programIds));
+  } catch (ixLogErr) {
+    console.warn("Could not decode program IDs:", ixLogErr);
+  }
+
+  const latest = await connection.getLatestBlockhash("confirmed");
+  tx.message.recentBlockhash = latest.blockhash;
+  tx.sign([bot]);
+
+  let sig: string;
+  try {
+    sig = await connection.sendRawTransaction(tx.serialize(), {
+      skipPreflight: false,
+      maxRetries: 3,
+    });
+  } catch (sendErr) {
+    const ste = sendErr as SendTransactionError;
+    console.error("SendRawTransaction failed:", ste);
+    if (ste?.logs) {
+      console.error("Simulation logs:", ste.logs);
+    }
+    if (typeof (ste as any).getLogs === "function") {
+      try {
+        const extraLogs = await (ste as any).getLogs(connection);
+        if (extraLogs) {
+          console.error("Simulation logs (getLogs):", extraLogs);
+        }
+      } catch (_) {
+        // ignore secondary failure
+      }
+    }
+    return null;
+  }
+
+  try {
+    const confirmation = await connection.confirmTransaction(
+      {
+        signature: sig,
+        blockhash: latest.blockhash,
+        lastValidBlockHeight: latest.lastValidBlockHeight,
+      },
+      "confirmed"
+    );
+
+    if (confirmation.value.err) {
+      console.log("⚠️ Perps transaction not confirmed; RPC reported error:", confirmation.value.err);
+      return null;
+    }
+
+    if (payload.reduceOnly) {
+      console.log(`✅ Perps position reduced/closed (${logLabel}):`);
+    } else {
+      console.log(`✅ Perps ${side.toUpperCase()} position opened:`);
+    }
+    console.log(`   Transaction: ${sig}`);
+    if (resp.data.positionPubkey) {
+      console.log(`   Position: ${resp.data.positionPubkey}`);
+    }
+    const quote = resp.data.quote;
+    if (quote?.positionSizeUsd) console.log(`   Size: $${quote.positionSizeUsd}`);
+    if (quote?.leverage) console.log(`   Leverage: ${quote.leverage}x`);
+    if (quote?.entryPriceUsd) console.log(`   Entry Price: $${quote.entryPriceUsd}`);
+    console.log("✅ Transaction confirmed on-chain!");
+  } catch (confirmError) {
+    const explorerUrl =
+      jupPerpsEnv === "devnet"
+        ? `https://solscan.io/tx/${sig}?cluster=devnet`
+        : `https://solscan.io/tx/${sig}`;
+    console.log(
+      "⚠️  Transaction sent but confirmation failed/pending; check manually:",
+      explorerUrl
+    );
+    return null;
+  }
+
+  return resp.data?.positionPubkey ?? null;
+}
+
 export async function buildAndSendPerpsTx(
   params: BuildParams
 ): Promise<string | null> {
@@ -68,6 +357,73 @@ export async function buildAndSendPerpsTx(
 
   try {
     if (intent.action === "DO_NOTHING") {
+      return null;
+    }
+
+    const openPositions = await fetchOpenPerpsPositions(bot.publicKey);
+    if (openPositions === null) {
+      console.log("[Perps] Could not verify existing positions; skipping to avoid overlap.");
+      return null;
+    }
+
+    if (openPositions.length > 0) {
+      const normalized = openPositions
+        .map((p) => normalizePerpsPosition(p))
+        .filter((p): p is NormalizedPerpsPosition => !!p);
+
+      if (!normalized.length) {
+        console.log("[Perps] Unable to normalize existing position; skipping new trade to avoid overlap.");
+        return null;
+      }
+
+      const currentPos = normalized[0];
+      const exitDecision = evaluateExitDecision(currentPos, intent);
+
+      if (exitDecision.shouldClose) {
+        console.log(`[Perps] Closing existing position: ${exitDecision.reason ?? "exit signal"}.`);
+        if (jupPerpsEnv === "mainnet") {
+          console.log("[Perps] MAINNET TRADE: sending close transaction to Solana mainnet.");
+        }
+
+        const sizeUsdDelta =
+          currentPos.sizeUsd && currentPos.sizeUsd > 0
+            ? Math.max(1, Math.ceil(currentPos.sizeUsd * 1_000_000))
+            : null;
+
+        if (!sizeUsdDelta) {
+          console.log("[Perps] Unknown position size; cannot build close tx.");
+          return null;
+        }
+
+        const payload = {
+          side: currentPos.side,
+          marketMint: SOL_MINT,
+          inputMint: currentPos.side === "short" ? USDC_MINT : SOL_MINT,
+          collateralMint: currentPos.side === "short" ? USDC_MINT : SOL_MINT,
+          sizeUsdDelta: String(sizeUsdDelta),
+          collateralTokenDelta: "0",
+          maxSlippageBps: "200",
+          feeToken: "USDC",
+          feeTokenAmount: "0",
+          feeReceiver: bot.publicKey.toBase58(),
+          walletAddress: bot.publicKey.toBase58(),
+          transactionType: "legacy",
+          env: jupPerpsEnv,
+          reduceOnly: true,
+        };
+
+        return await submitPerpsApiTx({
+          payload,
+          side: currentPos.side,
+          connection,
+          bot,
+          logLabel: exitDecision.reason ?? "close",
+        });
+      }
+
+      console.log(
+        "[Perps] Existing open position detected; no TP/SL/age/flip exit triggered. Skipping new trade to avoid overlap."
+      );
       return null;
     }
 
@@ -206,121 +562,13 @@ export async function buildAndSendPerpsTx(
       env: jupPerpsEnv,
     };
 
-    const resp = await axios.post(`${PERPS_API_BASE}/positions/increase`, payload, {
-      timeout: 10_000,
-      validateStatus: () => true,
+    return await submitPerpsApiTx({
+      payload,
+      side,
+      connection,
+      bot,
+      logLabel: "open",
     });
-
-    if (!resp.data || resp.data.error) {
-      console.log("Perps API error:", resp.data?.message ?? resp.data?.error ?? resp.status);
-      return null;
-    }
-
-    const { serializedTxBase64, txMetadata } = resp.data;
-    if (txMetadata) {
-      console.log("Perps txMetadata (from API):", txMetadata);
-    }
-    if (!serializedTxBase64) {
-      console.log("Perps API did not return a serialized transaction. Full response:");
-      console.log(resp.data);
-      return null;
-    }
-
-    const txBytes = Buffer.from(serializedTxBase64, "base64");
-    const tx = VersionedTransaction.deserialize(txBytes);
-
-    // Debug: list program IDs and address table lookups to ensure we are on the right cluster.
-    try {
-      const message = tx.message;
-      const programIds = new Set<string>();
-      for (const ix of message.compiledInstructions) {
-        const pid = message.staticAccountKeys[ix.programIdIndex]?.toBase58();
-        if (pid) programIds.add(pid);
-      }
-      if (message.addressTableLookups?.length) {
-        console.log(
-          "Address table lookups (program IDs will be resolved on-chain):",
-          message.addressTableLookups.map((l) => ({
-            accountKey: l.accountKey.toBase58(),
-            writableIndexes: Array.from(l.writableIndexes),
-            readonlyIndexes: Array.from(l.readonlyIndexes),
-          }))
-        );
-      }
-      console.log("Programs referenced in tx:", Array.from(programIds));
-    } catch (ixLogErr) {
-      console.warn("Could not decode program IDs:", ixLogErr);
-    }
-
-    // Refresh blockhash to avoid "blockhash not found" on our RPC.
-    const latest = await connection.getLatestBlockhash("confirmed");
-    tx.message.recentBlockhash = latest.blockhash;
-    tx.sign([bot]);
-
-    let sig: string;
-    try {
-      // Skip preflight if the API-provided blockhash is close to expiring; otherwise allow simulation
-      sig = await connection.sendRawTransaction(tx.serialize(), {
-        skipPreflight: false,
-        maxRetries: 3,
-      });
-    } catch (sendErr) {
-      const ste = sendErr as SendTransactionError;
-      console.error("SendRawTransaction failed:", ste);
-      if (ste?.logs) {
-        console.error("Simulation logs:", ste.logs);
-      }
-      // Some SendTransactionError instances support getLogs(); call if present.
-      if (typeof (ste as any).getLogs === "function") {
-        try {
-          const extraLogs = await (ste as any).getLogs(connection);
-          if (extraLogs) {
-            console.error("Simulation logs (getLogs):", extraLogs);
-          }
-        } catch (_) {
-          // ignore secondary failure
-        }
-      }
-      return null;
-    }
-
-    // Confirm transaction using returned blockhash metadata
-    try {
-      const confirmation = await connection.confirmTransaction(
-        {
-          signature: sig,
-          blockhash: latest.blockhash,
-          lastValidBlockHeight: latest.lastValidBlockHeight,
-        },
-        "confirmed"
-      );
-
-      const quote = resp.data.quote;
-      if (confirmation.value.err) {
-        console.log("⚠️ Perps transaction not confirmed; RPC reported error:", confirmation.value.err);
-        return null;
-      }
-
-      console.log(`✅ Perps ${side.toUpperCase()} position opened:`);
-      console.log(`   Transaction: ${sig}`);
-      console.log(`   Position: ${resp.data.positionPubkey}`);
-      console.log(`   Size: $${quote?.positionSizeUsd ?? "N/A"}`);
-      console.log(`   Leverage: ${quote?.leverage ?? "N/A"}x`);
-      console.log(`   Entry Price: $${quote?.entryPriceUsd ?? "N/A"}`);
-      console.log("✅ Transaction confirmed on-chain!");
-    } catch (confirmError) {
-      const explorerUrl =
-        jupPerpsEnv === "devnet"
-          ? `https://solscan.io/tx/${sig}?cluster=devnet`
-          : `https://solscan.io/tx/${sig}`;
-      console.log(
-        "⚠️  Transaction sent but confirmation failed/pending; check manually:",
-        explorerUrl
-      );
-      return null;
-    }
-
-    return sig;
   } catch (error) {
     console.error("Failed to build/send perps transaction:", error);
     return null;
