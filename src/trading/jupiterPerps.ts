@@ -10,14 +10,14 @@ import axios from "axios";
 import type { TradeIntent } from "./types";
 import { config, jupPerpsEnv } from "../config";
 
+export type PerpsSide = "long" | "short";
+
 export interface PerpsMarketConfig {
   pool: PublicKey;
   custody: PublicKey;
   collateralCustody: PublicKey;
   programId: PublicKey;
 }
-
-type Side = "long" | "short";
 
 const PERPS_API_BASE = "https://perps-api.jup.ag/v1";
 // Mint addresses: SOL and USDC
@@ -44,13 +44,23 @@ async function getUsdcBalance(
 }
 
 type NormalizedPerpsPosition = {
-  side: Side;
+  positionPubkey: string | null;
+  side: PerpsSide;
   entryPrice: number | null;
   markPrice: number | null;
   createdAtMs: number | null;
   sizeUsd: number | null;
   raw: any;
 };
+
+export interface PerpsPosition {
+  positionPubkey: string;
+  side: PerpsSide;
+  sizeUsd: number;
+  entryPriceUsd: number | null;
+  indexPriceUsd?: number | null;
+  openedAtMs?: number | null;
+}
 
 function numOrNull(v: any): number | null {
   if (typeof v === "number" && Number.isFinite(v)) return v;
@@ -64,9 +74,18 @@ function numOrNull(v: any): number | null {
 function normalizePerpsPosition(p: any): NormalizedPerpsPosition | null {
   if (!p) return null;
   const sideRaw = (p.side ?? p.positionSide ?? "").toString().toLowerCase();
-  const side: Side | null =
+  const side: PerpsSide | null =
     sideRaw === "long" ? "long" : sideRaw === "short" ? "short" : null;
   if (!side) return null;
+
+  const positionPubkey =
+    typeof p.positionPubkey === "string"
+      ? p.positionPubkey
+      : typeof p.position === "string"
+      ? p.position
+      : typeof p.pubkey === "string"
+      ? p.pubkey
+      : null;
 
   const entryPrice =
     numOrNull(p.entryPriceUsd) ??
@@ -109,6 +128,7 @@ function normalizePerpsPosition(p: any): NormalizedPerpsPosition | null {
     null;
 
   return {
+    positionPubkey,
     side,
     entryPrice,
     markPrice,
@@ -151,6 +171,65 @@ async function fetchOpenPerpsPositions(
     console.warn("Failed to fetch open perps positions:", err);
     return null;
   }
+}
+
+function isSolPerpPosition(p: any): boolean {
+  const marketMint = (p.marketMint ?? p.market ?? p.marketAddress ?? "").toString();
+  if (marketMint && marketMint === SOL_MINT) return true;
+
+  const asset = (p.asset ?? p.token ?? p.symbol ?? "").toString().toUpperCase();
+  if (asset === "SOL") return true;
+
+  const marketName = (p.marketName ?? p.market ?? "").toString().toUpperCase();
+  return marketName.includes("SOL");
+}
+
+export async function getOpenSolPerpsPosition(
+  walletAddress: string | PublicKey
+): Promise<PerpsPosition | null> {
+  const wallet =
+    typeof walletAddress === "string" ? new PublicKey(walletAddress) : walletAddress;
+
+  const openPositions = await fetchOpenPerpsPositions(wallet);
+  console.log(`[getOpenSolPerpsPosition] Fetched ${openPositions?.length ?? 0} open positions from API`);
+  
+  if (!openPositions || openPositions.length === 0) {
+    console.log(`[getOpenSolPerpsPosition] No open positions found`);
+    return null;
+  }
+
+  console.log(`[getOpenSolPerpsPosition] All positions:`, JSON.stringify(openPositions, null, 2));
+
+  const solPositions = openPositions.filter((p) => isSolPerpPosition(p));
+  console.log(`[getOpenSolPerpsPosition] Filtered to ${solPositions.length} SOL positions`);
+  
+  if (!solPositions.length) {
+    console.log(`[getOpenSolPerpsPosition] No SOL positions after filtering`);
+    return null;
+  }
+
+  const normalized = solPositions
+    .map((p) => normalizePerpsPosition(p))
+    .filter((p): p is NormalizedPerpsPosition => !!p && !!p.side);
+
+  console.log(`[getOpenSolPerpsPosition] Normalized to ${normalized.length} valid positions`);
+
+  if (!normalized.length) {
+    console.log(`[getOpenSolPerpsPosition] No valid normalized positions`);
+    return null;
+  }
+
+  const pos = normalized[0];
+  const result = {
+    positionPubkey: pos.positionPubkey ?? "unknown",
+    side: pos.side,
+    sizeUsd: pos.sizeUsd ?? 0,
+    entryPriceUsd: pos.entryPrice,
+    indexPriceUsd: pos.markPrice,
+    openedAtMs: pos.createdAtMs,
+  };
+  console.log(`[getOpenSolPerpsPosition] Returning position:`, result);
+  return result;
 }
 
 function evaluateExitDecision(
@@ -200,7 +279,7 @@ function evaluateExitDecision(
 
 export async function getSolPerpsMarketConfig(
   botPubkey: PublicKey,
-  side: Side
+  side: PerpsSide
 ): Promise<PerpsMarketConfig | null> {
   // For API-based approach, we don't need actual market config.
   // The API handles account derivation internally. Return dummy config.
@@ -221,7 +300,7 @@ interface BuildParams {
 
 async function submitPerpsApiTx(params: {
   payload: any;
-  side: Side;
+  side: PerpsSide;
   connection: Connection;
   bot: Keypair;
   logLabel: string;
@@ -427,7 +506,7 @@ export async function buildAndSendPerpsTx(
       return null;
     }
 
-    const side: Side = intent.action === "OPEN_LONG" ? "long" : "short";
+    const side: PerpsSide = intent.action === "OPEN_LONG" ? "long" : "short";
 
     // For shorts, use USDC as collateral; for longs, use SOL
     const isShort = side === "short";

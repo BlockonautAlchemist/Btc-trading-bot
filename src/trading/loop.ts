@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { runSolPerpsBotOnce } from "./bot";
 
 const INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
